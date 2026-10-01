@@ -16,6 +16,8 @@ export interface Stage {
   /** World position of the dog's head — where food must be dropped to be eaten. */
   mouthPosition: () => THREE.Vector3;
   camera: THREE.Camera;
+  /** Swing the camera around the creature, in radians. */
+  setOrbit: (yaw: number) => void;
 }
 
 /** Notified when food is picked up or eaten, so the UI can react. */
@@ -183,17 +185,17 @@ export async function createStage(
 
   // The source model is authored lying along Z (X=0.32, Y=0.90, Z=1.18) — it is
   // long front-to-back, not tall. Normalising by height alone squashes it, so
-  // scale by the longest edge and then turn it to face the camera.
+  // scale by the longest edge.
   const box = new THREE.Box3().setFromObject(model);
   const size = box.getSize(new THREE.Vector3());
   const longest = Math.max(size.x, size.y, size.z) || 1;
   const scale = 1.9 / longest;
   model.scale.setScalar(scale);
 
-  // face the camera: the animal runs along +Z, so yaw it a quarter turn and
-  // tip it slightly so we see the side/three-quarter view rather than its nose.
-  model.rotation.y = Math.PI * 0.5;
-  model.rotation.x = -0.06;
+  // The animal runs along +Z, i.e. it is authored nose-out toward the camera when
+  // unrotated. Leave it there: the creature drives its own yaw via `pivot`, and a
+  // baked quarter-turn here would make "face the viewer" impossible to express.
+  model.rotation.x = -0.04;
 
   const box2 = new THREE.Box3().setFromObject(model);
   model.position.y -= box2.min.y; // stand on the floor
@@ -246,6 +248,12 @@ export async function createStage(
     return v;
   };
 
+  /** Orbit angle of the camera around the creature, and its eased target. */
+  let camYaw = 0;
+  let camYawTarget = 0;
+  /** Last yaw the food row was arranged for, so it only re-lays when it moves. */
+  let lastFoodYaw = -99;
+
   // ---- loop
   let raf = 0;
   let last = performance.now();
@@ -259,10 +267,32 @@ export async function createStage(
     creature.update(dt);
     feeding.update(elapsed);
 
-    // camera drifts slightly toward the creature, so it feels observed
+    // ---- orbiting camera
+    // Drag with the right button (or two fingers) to swing around the creature.
+    // The creature then turns to keep facing the viewer, so you can walk all the
+    // way round to its front, side and back.
+    camYaw += (camYawTarget - camYaw) * Math.min(1, dt * 6);
     const cx = creature.root.position.x;
-    camera.position.x += (cx * 0.28 - camera.position.x) * Math.min(1, dt * 1.2);
+    const radius = 3.7;
+    const camX = cx + Math.sin(camYaw) * radius;
+    const camZ = Math.cos(camYaw) * radius;
+    camera.position.x += (camX - camera.position.x) * Math.min(1, dt * 1.6);
+    camera.position.z += (camZ - camera.position.z) * Math.min(1, dt * 1.6);
+    camera.position.y = 1.35;
     camera.lookAt(cx * 0.5, 0.62, 0);
+
+    // Tell the creature where the viewer is, in its own local space, so it can
+    // turn to meet the camera rather than always presenting a profile.
+    const worldYaw = camYaw; // camera sits at +yaw around the origin
+    const facingYaw = worldYaw - creature.root.rotation.y;
+    creature.faceToward(-facingYaw, creature.getState().touching);
+
+    // Keep the food row in front of the viewer as the camera swings round, so it
+    // is never occluded by the dog's body.
+    if (Math.abs(camYaw - lastFoodYaw) > 0.01) {
+      feeding.setOrbit(camYaw, creature.root.position);
+      lastFoodYaw = camYaw;
+    }
 
     renderer.render(scene, camera);
     raf = requestAnimationFrame(tick);
@@ -275,6 +305,39 @@ export async function createStage(
     renderer.setSize(window.innerWidth, window.innerHeight);
   };
   window.addEventListener('resize', onResize);
+
+  // ---- orbit controls
+  // Right-drag orbits the camera. The left button is reserved for petting and for
+  // dragging food, so it cannot double as the camera control.
+  let orbitDragging = false;
+  let orbitLastX = 0;
+
+  const onContextMenu = (e: MouseEvent) => {
+    // stop the browser menu so a right-drag can rotate
+    if (orbitDragging || (e.target as HTMLElement)?.tagName === 'CANVAS') e.preventDefault();
+  };
+  const onPointerDownOrbit = (e: PointerEvent) => {
+    if (e.button !== 2 && e.button !== 1) return;
+    orbitDragging = true;
+    orbitLastX = e.clientX;
+    e.preventDefault();
+  };
+  const onPointerMoveOrbit = (e: PointerEvent) => {
+    if (!orbitDragging) return;
+    const dx = e.clientX - orbitLastX;
+    orbitLastX = e.clientX;
+    camYawTarget += dx * 0.006;
+  };
+  const onPointerUpOrbit = (e: PointerEvent) => {
+    if (e.button !== 2 && e.button !== 1) return;
+    orbitDragging = false;
+  };
+
+  window.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('pointerdown', onPointerDownOrbit);
+  window.addEventListener('pointermove', onPointerMoveOrbit);
+  window.addEventListener('pointerup', onPointerUpOrbit);
+  window.addEventListener('pointercancel', onPointerUpOrbit);
 
   // ---- debug hook: expose the pieces the drag maths depends on, so the
   // gesture can be inspected from the console without guessing.
@@ -299,6 +362,14 @@ export async function createStage(
     items() {
       return feeding.debugItems();
     },
+    /** Orbit the camera, for tests and for the on-screen hint. */
+    setOrbit(yaw: number) {
+      camYawTarget = yaw;
+      camYaw = yaw;
+    },
+    getOrbit() {
+      return camYaw;
+    },
   };
 
   return {
@@ -307,9 +378,18 @@ export async function createStage(
     camera,
     mouthPosition,
     raycastHit: hitsCreature,
+    setOrbit: (yaw: number) => {
+      camYawTarget = yaw;
+      camYaw = yaw;
+    },
     dispose: () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('contextmenu', onContextMenu);
+      window.removeEventListener('pointerdown', onPointerDownOrbit);
+      window.removeEventListener('pointermove', onPointerMoveOrbit);
+      window.removeEventListener('pointerup', onPointerUpOrbit);
+      window.removeEventListener('pointercancel', onPointerUpOrbit);
       creature.dispose();
       renderer.dispose();
     },

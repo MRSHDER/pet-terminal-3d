@@ -42,6 +42,19 @@ function noise1(x: number): number {
 export class Creature {
   readonly root = new THREE.Group();
 
+  /**
+   * The loaded model lives here rather than directly under `root`, so the rig's
+   * authored orientation and the creature's own facing stay independent.
+   * `root` carries position and the lean; this carries yaw only.
+   */
+  readonly pivot = new THREE.Group();
+
+  /** Yaw the creature turns toward. Drives "it looks at you". */
+  private facingTarget = 0;
+  private facing = 0;
+  /** True when it is deliberately facing the viewer, so it holds the pose. */
+  private attending = false;
+
   private bones: Record<string, THREE.Bone | THREE.Object3D> = {};
   private state: CreatureState = {
     mood: 'idle',
@@ -78,6 +91,8 @@ export class Creature {
 
   constructor() {
     this.root.name = 'CreatureRoot';
+    this.pivot.name = 'CreaturePivot';
+    this.root.add(this.pivot);
   }
 
   /** Call once the GLB has loaded. */
@@ -107,7 +122,16 @@ export class Creature {
       }
     }
 
-    this.root.add(gltfScene);
+    this.pivot.add(gltfScene);
+  }
+
+  /**
+   * Point the creature toward a yaw, in the creature's own space.
+   * Called each frame with an angle derived from where the viewer is.
+   */
+  faceToward(yaw: number, attentive: boolean) {
+    this.facingTarget = yaw;
+    this.attending = attentive;
   }
 
   private rest = new Map<string, { x: number; y: number; z: number }>();
@@ -289,6 +313,18 @@ export class Creature {
     this.root.position.x = this.currentX;
     // recoil: a quick step back when it tastes something it dislikes
     this.root.position.z = this.recoil * 0.22;
+
+    // ---- turn to face the viewer
+    // Shortest-path interpolation, or a 350deg -> 10deg turn would spin the long
+    // way round and look like it was running off.
+    let diff = this.facingTarget - this.facing;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    // Attentive (being touched or fed) turns quickly and holds; idle drifts
+    // lazily and lets the head wander instead.
+    const turnSpeed = this.attending ? 3.4 : 0.9;
+    this.facing += diff * Math.min(1, dt * turnSpeed);
+    this.pivot.rotation.y = this.facing;
 
     const moving = Math.abs(this.targetX - this.currentX) > 0.02;
 

@@ -49,16 +49,17 @@ export class FeedingArea {
   }
 
   /**
-   * Lay the food out in a shallow arc in front of the dog.
+   * Lay the food out in a shallow arc on the viewer's side of the dog.
    *
-   * `mouthZ` is where the dog's muzzle projects onto the floor. Food sits just
-   * short of it (toward the camera) so the drag distance to the mouth is tiny —
-   * a long drag across the screen is what made feeding feel unresponsive.
+   * It must not sit right under the muzzle: when the camera orbits, the dog's
+   * body would then hide the food. Putting the row near the camera keeps every
+   * item visible from any angle, and the drag distance to the dog stays short
+   * because the camera is only a few units away.
    */
   build(camera: THREE.Camera, creatureX = 0, mouthZ = 0.35) {
     const cols = 4;
-    const spacingX = 0.46;
-    const spacingZ = 0.34;
+    const spacingX = 0.52;
+    const spacingZ = 0.42;
     this.items = FOODS.map((def, i) => {
       const group = buildFood(def.kind);
       const shadow = buildFoodShadow(def.radius);
@@ -66,7 +67,7 @@ export class FeedingArea {
       const col = i % cols;
       const row = Math.floor(i / cols);
       const x = (col - (cols - 1) / 2) * spacingX + creatureX * 0.3;
-      const z = mouthZ + 0.12 + row * spacingZ;
+      const z = mouthZ + 0.75 + row * spacingZ;
 
       group.position.set(x, 0, z);
       shadow.position.set(x, 0, z);
@@ -77,6 +78,25 @@ export class FeedingArea {
       return { kind: def.kind, group, shadow, home: new THREE.Vector3(x, 0, z) };
     });
     void camera;
+  }
+
+  /**
+   * Keep the food row on the viewer's side as the camera orbits, so it never
+   * ends up hidden behind the dog.
+   */
+  setOrbit(yaw: number, centre: THREE.Vector3) {
+    for (const item of this.items) {
+      if (item === this.dragging) continue;
+      // rotate the item's home offset about the dog by the camera yaw
+      const ox = item.home.x - centre.x;
+      const oz = item.home.z - centre.z;
+      const c = Math.cos(yaw);
+      const s = Math.sin(yaw);
+      item.home.set(centre.x + ox * c + oz * s, 0, centre.z - ox * s + oz * c);
+      if (!item.group.visible) continue;
+      item.group.position.set(item.home.x, 0, item.home.z);
+      item.shadow.position.set(item.home.x, 0.006, item.home.z);
+    }
   }
 
   /**
