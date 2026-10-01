@@ -236,13 +236,17 @@ export class Creature {
       this.pose('Head', -this.headLift * 0.4, look, (noise1(this.clock * 0.5 + 50) - 0.5) * 0.08);
     }
 
-    // ---- tail: the clearest emotional readout
+    // ---- tail: the clearest emotional readout.
+    // A fox carries its brush high; a dog's tail hangs lower at rest and lifts
+    // as it gets excited, so the resting offset pulls down and only the wag
+    // (and the happy lift) raises it.
     if (tail1 && tail2) {
       const speed = 2.5 + this.tailEnergy * 9;
       const amp = 0.12 + this.tailEnergy * 0.5;
       const wag = Math.sin(this.clock * speed) * amp;
-      this.pose('Tail1', -0.25 - this.tailEnergy * 0.35 + breath, wag, 0);
-      this.pose('Tail2', -0.2, wag * 1.6, 0);
+      const lift = 0.62 - this.tailEnergy * 0.62; // 0.62 at rest -> 0 when happy
+      this.pose('Tail1', lift + breath * 0.5, wag, 0);
+      this.pose('Tail2', 0.18 - this.tailEnergy * 0.1, wag * 1.6, 0);
     }
 
     // ---- legs
