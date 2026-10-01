@@ -24,7 +24,14 @@ interface FoodItem {
   kind: FoodKind;
   group: THREE.Group;
   shadow: THREE.Mesh;
+  /** Where the item sits right now (settles here after a missed drop). */
   home: THREE.Vector3;
+  /**
+   * The layout position, in the frame where the camera yaw is zero.
+   * `setOrbit` always rotates FROM this, never from `home`, or repeated orbit
+   * updates would compound and walk the items away.
+   */
+  anchor: THREE.Vector3;
 }
 
 /**
@@ -75,7 +82,13 @@ export class FeedingArea {
       this.root.add(shadow);
       this.root.add(group);
 
-      return { kind: def.kind, group, shadow, home: new THREE.Vector3(x, 0, z) };
+      return {
+        kind: def.kind,
+        group,
+        shadow,
+        home: new THREE.Vector3(x, 0, z),
+        anchor: new THREE.Vector3(x, 0, z),
+      };
     });
     void camera;
   }
@@ -83,19 +96,24 @@ export class FeedingArea {
   /**
    * Keep the food row on the viewer's side as the camera orbits, so it never
    * ends up hidden behind the dog.
+   *
+   * Always rotates from `anchor` (the yaw-zero layout), never from the current
+   * position: rotating the current position each frame compounds, and the row
+   * slowly spirals around to the far side of the dog.
    */
   setOrbit(yaw: number, centre: THREE.Vector3) {
     for (const item of this.items) {
-      if (item === this.dragging) continue;
-      // rotate the item's home offset about the dog by the camera yaw
-      const ox = item.home.x - centre.x;
-      const oz = item.home.z - centre.z;
+      const ox = item.anchor.x - centre.x;
+      const oz = item.anchor.z - centre.z;
       const c = Math.cos(yaw);
       const s = Math.sin(yaw);
-      item.home.set(centre.x + ox * c + oz * s, 0, centre.z - ox * s + oz * c);
-      if (!item.group.visible) continue;
-      item.group.position.set(item.home.x, 0, item.home.z);
-      item.shadow.position.set(item.home.x, 0.006, item.home.z);
+      const x = centre.x + ox * c + oz * s;
+      const z = centre.z - ox * s + oz * c;
+      item.home.set(x, 0, z);
+      if (item === this.dragging || !item.group.visible) continue;
+      // set(x, y, z): keep the item's own bob height, place it at the orbit spot.
+      item.group.position.set(x, item.group.position.y, z);
+      item.shadow.position.set(x, 0.006, z);
     }
   }
 
@@ -284,7 +302,14 @@ export class FeedingArea {
   update(t: number) {
     for (let i = 0; i < this.items.length; i++) {
       const it = this.items[i];
-      if (!it.group.visible) continue;
+
+      // An eaten item hides its mesh AND its shadow. Skipping the whole loop
+      // body left orphaned shadow discs behind, which looked like invisible food.
+      if (!it.group.visible) {
+        it.shadow.visible = false;
+        continue;
+      }
+      it.shadow.visible = true;
 
       if (it === this.dragging) {
         // Smoothly chase the pointer instead of snapping to it, so the item

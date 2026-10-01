@@ -273,13 +273,31 @@ export async function createStage(
     // way round to its front, side and back.
     camYaw += (camYawTarget - camYaw) * Math.min(1, dt * 6);
     const cx = creature.root.position.x;
+    const cz = creature.root.position.z;
+
+    // Keep a hard floor on the orbit radius. The dog's meshes are ~1.9 units
+    // long, so a radius below that puts the near plane inside its body and the
+    // screen fills with fur.
     const radius = 3.7;
-    const camX = cx + Math.sin(camYaw) * radius;
-    const camZ = Math.cos(camYaw) * radius;
-    camera.position.x += (camX - camera.position.x) * Math.min(1, dt * 1.6);
-    camera.position.z += (camZ - camera.position.z) * Math.min(1, dt * 1.6);
+    const targetX = cx + Math.sin(camYaw) * radius;
+    const targetZ = cz + Math.cos(camYaw) * radius;
+
+    camera.position.x += (targetX - camera.position.x) * Math.min(1, dt * 1.6);
+    camera.position.z += (targetZ - camera.position.z) * Math.min(1, dt * 1.6);
     camera.position.y = 1.35;
-    camera.lookAt(cx * 0.5, 0.62, 0);
+
+    // Safety net: if the camera somehow ends up inside the creature's bounding
+    // sphere, push it back out along the view direction.
+    const focus = new THREE.Vector3(cx * 0.5, 0.62, cz);
+    const away = camera.position.clone().sub(focus);
+    const dist = away.length();
+    const MIN_CAM_DIST = 2.2;
+    if (dist < MIN_CAM_DIST) {
+      away.setLength(MIN_CAM_DIST);
+      camera.position.copy(focus).add(away);
+    }
+
+    camera.lookAt(focus);
 
     // Tell the creature where the viewer is, in its own local space, so it can
     // turn to meet the camera rather than always presenting a profile.
