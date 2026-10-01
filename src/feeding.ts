@@ -27,6 +27,15 @@ interface FoodItem {
   home: THREE.Vector3;
 }
 
+/**
+ * How far a held item sits above the floor. Kept tiny on purpose: any larger
+ * and the item visibly floats away from the pointer instead of tracking it.
+ */
+const DRAG_LIFT = 0.09;
+
+/** How quickly a held item catches up to the pointer (per 60fps frame). */
+const FOLLOW_LERP = 0.35;
+
 export class FeedingArea {
   readonly root = new THREE.Group();
 
@@ -103,7 +112,12 @@ export class FeedingArea {
     const item = this.pick(clientX, clientY, camera);
     if (!item) return false;
     this.dragging = item;
-    item.group.position.y = 0.45; // lift it off the floor
+    // A small constant lift only — enough to read as "picked up" without the
+    // item visibly floating away from the pointer.
+    item.group.position.y = DRAG_LIFT;
+    // Start the follow target at the item's current spot so it does not lurch
+    // toward the origin on the first move.
+    this.dragTarget.copy(item.group.position);
     this.cb.onPickup(item.kind);
     return true;
   }
@@ -113,19 +127,21 @@ export class FeedingArea {
     if (!this.dragging) return false;
     const p = this.toFloor(clientX, clientY, camera);
     if (p) {
-      // Clamp so the item never flies off behind the dog when the pointer is
-      // aimed at its head (that ray hits the floor metres away).
+      // Clamp so the item cannot be flung off the far side of the room when the
+      // pointer aims at the dog's head and the floor ray overshoots. The far
+      // bound stays tight; the near bound is loose because that is the direction
+      // the dog actually stands in.
       const cx = THREE.MathUtils.clamp(p.x, -3, 3);
-      const cz = THREE.MathUtils.clamp(p.z, -1.2, 3);
-      this.dragging.group.position.set(cx, 0.4, cz);
-      this.dragging.shadow.position.set(cx, 0.006, cz);
+      const cz = THREE.MathUtils.clamp(p.z, -0.6, 4);
+      this.dragTarget.set(cx, DRAG_LIFT, cz);
     }
     this.lastPointer = { x: clientX, y: clientY };
     this.nearMouth = this.cb.isOverCreature(clientX, clientY);
-    const s = this.nearMouth ? 1.2 : 1;
-    this.dragging.group.scale.lerp(new THREE.Vector3(s, s, s), 0.25);
     return true;
   }
+
+  /** Where the held item is heading; smoothed toward in update(). */
+  private dragTarget = new THREE.Vector3();
 
   private lastPointer: { x: number; y: number } | null = null;
 
@@ -173,12 +189,12 @@ export class FeedingArea {
       return { kind: item.kind };
     }
 
-    // missed: let it settle where it was dropped
+    // missed: let it settle flat on the floor where it was dropped
+    const px = item.group.position.x;
+    const pz = item.group.position.z;
+    item.group.position.set(px, 0, pz);
     item.group.scale.setScalar(1);
-    const home = item.home;
-    item.group.position.set(item.group.position.x, 0, item.group.position.z);
-    item.shadow.position.set(item.group.position.x, 0.006, item.group.position.z);
-    void home;
+    item.shadow.position.set(px, 0.006, pz);
     return null;
   }
 
@@ -214,12 +230,23 @@ export class FeedingArea {
   update(t: number) {
     for (let i = 0; i < this.items.length; i++) {
       const it = this.items[i];
-      if (it === this.dragging || !it.group.visible) continue;
+      if (!it.group.visible) continue;
+
+      if (it === this.dragging) {
+        // Smoothly chase the pointer instead of snapping to it, so the item
+        // looks held rather than teleported.
+        it.group.position.lerp(this.dragTarget, FOLLOW_LERP);
+        it.group.position.y = DRAG_LIFT;
+        it.shadow.position.set(it.group.position.x, 0.006, it.group.position.z);
+        it.group.rotation.y += 0.03;
+        const s = this.nearMouth ? 1.18 : 1;
+        it.group.scale.lerp(new THREE.Vector3(s, s, s), 0.25);
+        continue;
+      }
+
+      it.group.scale.lerp(new THREE.Vector3(1, 1, 1), 0.25);
       it.group.position.y = Math.sin(t * 1.6 + i * 0.8) * 0.012;
       it.group.rotation.y = Math.sin(t * 0.5 + i) * 0.25;
-    }
-    if (this.dragging) {
-      this.dragging.group.rotation.y += 0.02;
     }
   }
 }
