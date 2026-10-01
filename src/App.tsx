@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createStage, type Stage } from './stage';
 import type { CreatureState } from './creature';
+import { FOODS, type FoodKind } from './food';
 import './styles.css';
 
 const MOOD_TEXT: Record<CreatureState['mood'], string> = {
@@ -8,74 +9,114 @@ const MOOD_TEXT: Record<CreatureState['mood'], string> = {
   curious: '它注意到你了',
   happy: '它很享受',
   annoyed: '它有点烦了',
+  eating: '它在吃',
+  disgusted: '它不太喜欢这个',
+};
+
+const REACTION: Record<FoodKind, string> = {
+  meat: '一口吞了',
+  sausage: '吃得很香',
+  bone: '啃得起劲',
+  cheese: '很喜欢',
+  kibble: '老老实实吃了',
+  carrot: '勉强吃了几口',
+  apple: '闻了闻，吃了',
+  broccoli: '一脸嫌弃地走开了',
 };
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<Stage | null>(null);
-  const pressingRef = useRef(false);
+  const pressingCreature = useRef(false);
 
-  const [creatureState, setCreatureState] = useState<CreatureState>({
+  const [state, setState] = useState<CreatureState>({
     mood: 'idle',
     bond: 0,
     irritation: 0,
     touching: false,
+    sated: 0.25,
   });
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [held, setHeld] = useState<FoodKind | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     let disposed = false;
-    createStage(canvas)
+    let toastTimer = 0;
+
+    createStage(canvas, {
+      onPickup: (kind) => setHeld(kind),
+      onFed: (kind) => {
+        setHeld(null);
+        setToast(REACTION[kind]);
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => setToast(null), 2000);
+      },
+    })
       .then((stage) => {
         if (disposed) {
           stage.dispose();
           return;
         }
         stageRef.current = stage;
-        stage.creature.onStateChange = setCreatureState;
-        setCreatureState(stage.creature.getState());
+        stage.creature.onStateChange = setState;
+        setState(stage.creature.getState());
         setReady(true);
       })
       .catch((e) => setError(String(e?.message ?? e)));
 
     return () => {
       disposed = true;
+      window.clearTimeout(toastTimer);
       stageRef.current?.dispose();
       stageRef.current = null;
     };
   }, []);
 
-  // Press-and-hold anywhere on the creature. Raycast decides whether the press
-  // actually landed on it, so touching the floor does nothing.
+  // One pointer pipeline serves both gestures: dragging food wins, otherwise a
+  // press that lands on the dog is a pet.
   useEffect(() => {
-    const toNdc = (e: PointerEvent) => ({
-      x: (e.clientX / window.innerWidth) * 2 - 1,
-      y: -(e.clientY / window.innerHeight) * 2 + 1,
-    });
-
     const down = (e: PointerEvent) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const { x, y } = toNdc(e);
-      if (!stage.raycastHit(x, y)) return;
-      pressingRef.current = true;
-      stage.creature.onTouchStart();
+      if (stage.feeding.beginDrag(e.clientX, e.clientY, stage.camera)) return;
+      const nx = (e.clientX / window.innerWidth) * 2 - 1;
+      const ny = -(e.clientY / window.innerHeight) * 2 + 1;
+      if (stage.raycastHit(nx, ny)) {
+        pressingCreature.current = true;
+        stage.creature.onTouchStart();
+      }
+    };
+    const move = (e: PointerEvent) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      stage.feeding.moveDrag(e.clientX, e.clientY, stage.camera);
     };
     const up = () => {
-      if (!pressingRef.current) return;
-      pressingRef.current = false;
-      stageRef.current?.creature.onTouchEnd();
+      const stage = stageRef.current;
+      if (!stage) return;
+      if (stage.feeding.isDragging) {
+        stage.feeding.endDrag();
+        setHeld(null);
+        return;
+      }
+      if (pressingCreature.current) {
+        pressingCreature.current = false;
+        stage.creature.onTouchEnd();
+      }
     };
 
     window.addEventListener('pointerdown', down);
+    window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', up);
     return () => {
       window.removeEventListener('pointerdown', down);
+      window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', up);
     };
@@ -88,7 +129,7 @@ export default function App() {
       {!ready && !error && <div className="loading">正在唤醒…</div>}
       {error && (
         <div className="error">
-          <p>模型加载失败</p>
+          <p>加载失败</p>
           <code>{error}</code>
         </div>
       )}
@@ -97,16 +138,32 @@ export default function App() {
         <>
           <header className="hud-top">
             <span className="brand">L.D.C. · 3D</span>
-            <span className="mood">{MOOD_TEXT[creatureState.mood]}</span>
+            <span className="mood">{MOOD_TEXT[state.mood]}</span>
           </header>
 
+          {toast && <div className="toast">{toast}</div>}
+
           <footer className="hud-bottom">
-            <div className="hint">按住它试试</div>
+            <div className="hint">
+              {held ? '拖到它嘴边松开' : '按住它试试 · 或者把食物拖给它'}
+            </div>
             <div className="meters">
-              <Meter label="羁绊" value={creatureState.bond} tone="bond" />
-              <Meter label="烦躁" value={creatureState.irritation} tone="irritation" />
+              <Meter label="羁绊" value={state.bond} tone="bond" />
+              <Meter label="饱食" value={state.sated} tone="sated" />
+              <Meter label="烦躁" value={state.irritation} tone="irritation" />
             </div>
           </footer>
+
+          <div className="pantry">
+            {FOODS.map((f) => (
+              <span
+                key={f.kind}
+                className={`pantry__item${held === f.kind ? ' is-held' : ''}`}
+              >
+                {f.name}
+              </span>
+            ))}
+          </div>
         </>
       )}
     </div>

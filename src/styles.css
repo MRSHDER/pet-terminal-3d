@@ -114,9 +114,63 @@ html, body, #root {
   transition: width 0.25s ease-out;
 }
 .meter--bond .meter__fill { background: var(--bond); }
+.meter--sated .meter__fill { background: var(--accent); }
 .meter--irritation .meter__fill { background: var(--warn); }
+
+/* reaction caption, briefly shown after it eats */
+.toast {
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  padding: 0.5rem 1.1rem;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  font-size: 0.86rem;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+  animation: toastIn 2s ease-out forwards;
+}
+@keyframes toastIn {
+  0% { opacity: 0; transform: translate(-50%, 6px); }
+  12% { opacity: 1; transform: translate(-50%, 0); }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* pantry legend: what is on the floor */
+.pantry {
+  position: absolute;
+  left: 50%;
+  top: 0.9rem;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  max-width: min(92vw, 40rem);
+  pointer-events: none;
+}
+.pantry__item {
+  padding: 0.22rem 0.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(14, 16, 19, 0.62);
+  color: var(--dim);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  transition: all 0.25s;
+}
+.pantry__item.is-held {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(127, 216, 255, 0.12);
+}
 
 @media (max-width: 640px) {
   .hud-bottom { flex-direction: column; align-items: stretch; }
   .meters { min-width: 0; }
+  .pantry { display: none; }
 }

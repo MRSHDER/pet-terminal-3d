@@ -5,14 +5,29 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Creature } from './creature';
+import { FeedingArea } from './feeding';
+import type { FoodKind } from './food';
 
 export interface Stage {
   creature: Creature;
+  feeding: FeedingArea;
   dispose: () => void;
   raycastHit: (nx: number, ny: number) => boolean;
+  /** World position of the dog's head — where food must be dropped to be eaten. */
+  mouthPosition: () => THREE.Vector3;
+  camera: THREE.Camera;
 }
 
-export async function createStage(canvas: HTMLCanvasElement): Promise<Stage> {
+/** Notified when food is picked up or eaten, so the UI can react. */
+export interface StageHooks {
+  onFed?: (kind: FoodKind) => void;
+  onPickup?: (kind: FoodKind) => void;
+}
+
+export async function createStage(
+  canvas: HTMLCanvasElement,
+  hooks: StageHooks = {},
+): Promise<Stage> {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -186,6 +201,30 @@ export async function createStage(canvas: HTMLCanvasElement): Promise<Stage> {
 
   creature.bind(model);
 
+  // ---- food laid out on the floor in front of the dog
+  const feeding = new FeedingArea({
+    onFed: (kind, appeal, nutrition) => {
+      creature.feed(appeal, nutrition);
+      hooks.onFed?.(kind);
+    },
+    onPickup: (kind) => hooks.onPickup?.(kind),
+    isOverCreature: (clientX, clientY) =>
+      hitsCreature(
+        (clientX / window.innerWidth) * 2 - 1,
+        -(clientY / window.innerHeight) * 2 + 1,
+      ),
+  });
+  // place food relative to where the muzzle actually sits on the floor
+  const muzzleZ = model.getObjectByName('Head')
+    ? (() => {
+        const v = new THREE.Vector3();
+        model.getObjectByName('Head')!.getWorldPosition(v);
+        return v.z + 0.18;
+      })()
+    : 0.35;
+  feeding.build(camera, 0, muzzleZ);
+  scene.add(feeding.root);
+
   // ---- interaction
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
@@ -196,15 +235,29 @@ export async function createStage(canvas: HTMLCanvasElement): Promise<Stage> {
     return raycaster.intersectObject(model, true).length > 0;
   };
 
+  /** Roughly the dog's muzzle, in world space. Food dropped near here is eaten. */
+  const mouthPosition = () => {
+    const head = model.getObjectByName('Head');
+    const v = new THREE.Vector3();
+    if (head) head.getWorldPosition(v);
+    else model.getWorldPosition(v);
+    // the rig's head pivot sits at the neck; push forward toward the snout
+    v.z += 0.34;
+    return v;
+  };
+
   // ---- loop
   let raf = 0;
   let last = performance.now();
+  let elapsed = 0;
   const tick = () => {
     const now = performance.now();
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
+    elapsed += dt;
 
     creature.update(dt);
+    feeding.update(elapsed);
 
     // camera drifts slightly toward the creature, so it feels observed
     const cx = creature.root.position.x;
@@ -223,8 +276,36 @@ export async function createStage(canvas: HTMLCanvasElement): Promise<Stage> {
   };
   window.addEventListener('resize', onResize);
 
+  // ---- debug hook: expose the pieces the drag maths depends on, so the
+  // gesture can be inspected from the console without guessing.
+  (window as unknown as { __stage?: unknown }).__stage = {
+    camera,
+    feeding,
+    mouthPosition,
+    creature,
+    /** Reproduce the app's screen->floor projection for a client point. */
+    project(clientX: number, clientY: number) {
+      const ndc = new THREE.Vector2(
+        (clientX / window.innerWidth) * 2 - 1,
+        -(clientY / window.innerHeight) * 2 + 1,
+      );
+      const rc = new THREE.Raycaster();
+      rc.setFromCamera(ndc, camera);
+      const hit = new THREE.Vector3();
+      const ok = rc.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit);
+      return ok ? { x: hit.x, y: hit.y, z: hit.z } : null;
+    },
+    /** Where each food currently sits. */
+    items() {
+      return feeding.debugItems();
+    },
+  };
+
   return {
     creature,
+    feeding,
+    camera,
+    mouthPosition,
     raycastHit: hitsCreature,
     dispose: () => {
       cancelAnimationFrame(raf);

@@ -11,7 +11,7 @@
  */
 import * as THREE from 'three';
 
-export type Mood = 'idle' | 'curious' | 'happy' | 'annoyed';
+export type Mood = 'idle' | 'curious' | 'happy' | 'annoyed' | 'eating' | 'disgusted';
 
 export interface CreatureState {
   mood: Mood;
@@ -21,6 +21,8 @@ export interface CreatureState {
   irritation: number;
   /** True while the pointer is held down on the creature. */
   touching: boolean;
+  /** 0..1 — how full it is. Rises when fed, falls slowly over time. */
+  sated: number;
 }
 
 /** Small deterministic 1D value-noise, so motion is smooth but not a pure sine. */
@@ -46,6 +48,7 @@ export class Creature {
     bond: 0,
     irritation: 0,
     touching: false,
+    sated: 0.25,
   };
 
   private clock = 0;
@@ -61,6 +64,15 @@ export class Creature {
   private blinkTimer = 2;
   private blinking = 0;
   private disposed = false;
+
+  /** Counts down while a chew/recoil reaction plays. */
+  private eatTimer = 0;
+  /** 1 = loved the food, 0 = hated it. Shapes the reaction animation. */
+  private eatLiking = 0;
+  /** Head-down chew bob. */
+  private chew = 0;
+  /** Recoil offset when it tastes something it dislikes. */
+  private recoil = 0;
 
   onStateChange?: (s: CreatureState) => void;
 
@@ -136,6 +148,37 @@ export class Creature {
     this.onStateChange?.(this.getState());
   }
 
+  // ---------------------------------------------------------------- feeding
+
+  /**
+   * Feed it something. `appeal` is -1..1: meat gets a happy chew, broccoli gets
+   * a recoil and a look of betrayal. Feeding also raises bond, but a disliked
+   * food raises it far less than a liked one.
+   */
+  feed(appeal: number, nutrition: number) {
+    this.eatTimer = 1.5;
+    this.eatLiking = Math.max(-1, Math.min(1, appeal));
+    this.chew = 0;
+
+    if (appeal > 0.3) {
+      this.state.mood = 'eating';
+      this.state.bond = Math.min(1, this.state.bond + 0.1 * appeal);
+      this.leanZ = 0.2;
+    } else if (appeal < -0.05) {
+      this.state.mood = 'disgusted';
+      this.recoil = 1;
+      // it barely trusts you after that
+      this.state.bond = Math.max(0, this.state.bond - 0.04);
+    } else {
+      // neutral: it eats, unenthusiastically
+      this.state.mood = 'eating';
+      this.state.bond = Math.min(1, this.state.bond + 0.02);
+    }
+
+    this.state.sated = Math.min(1, this.state.sated + nutrition * 0.45);
+    this.emit();
+  }
+
   // ---------------------------------------------------------------- input
 
   /** Pointer pressed down on the creature. */
@@ -197,12 +240,45 @@ export class Creature {
       this.state.bond = Math.max(0, this.state.bond - dt * 0.012);
     }
 
+    // ---- hunger: sated drifts down, so feeding has a reason to exist
+    this.state.sated = Math.max(0, this.state.sated - dt * 0.006);
+
+    // ---- eating reaction: a chew bob, or a recoil if it hated the food
+    if (this.eatTimer > 0) {
+      this.eatTimer -= dt;
+      if (this.eatLiking >= -0.05) {
+        this.chew = Math.max(0, Math.sin(this.clock * 18) * 0.5 + 0.5) * 0.5;
+      }
+      if (this.eatTimer <= 0) {
+        this.eatTimer = 0;
+        this.chew = 0;
+        this.state.mood = this.state.bond > 0.45 ? 'curious' : 'idle';
+        this.emit();
+      }
+    } else {
+      this.chew += (0 - this.chew) * Math.min(1, dt * 6);
+    }
+    this.recoil += (0 - this.recoil) * Math.min(1, dt * 2.2);
+
     // ---- desired motion targets, eased so nothing snaps
     const touching = this.state.touching;
     const mood = this.state.mood;
+    const isEating = this.eatTimer > 0 && this.eatLiking >= -0.05;
     const wantLean = touching && mood === 'happy' ? 0.16 : 0;
-    const wantLift = touching ? 0.42 : mood === 'curious' ? 0.18 : 0;
-    const wantTail = touching && mood === 'happy' ? 1 : mood === 'annoyed' ? 0.75 : 0.25;
+    const wantLift = isEating
+      ? -0.5 + this.chew * 0.25 // head goes DOWN to the food, bobbing
+      : touching
+        ? 0.42
+        : mood === 'curious'
+          ? 0.18
+          : 0;
+    const wantTail = isEating
+      ? Math.max(0, this.eatLiking) // wags hard for meat, barely for veg
+      : touching && mood === 'happy'
+        ? 1
+        : mood === 'annoyed'
+          ? 0.75
+          : 0.25;
 
     this.leanZ += (wantLean - this.leanZ) * Math.min(1, dt * 4);
     this.headLift += (wantLift - this.headLift) * Math.min(1, dt * 3.2);
@@ -211,6 +287,8 @@ export class Creature {
     // ---- walk toward the target X
     this.currentX += (this.targetX - this.currentX) * Math.min(1, dt * 1.6);
     this.root.position.x = this.currentX;
+    // recoil: a quick step back when it tastes something it dislikes
+    this.root.position.z = this.recoil * 0.22;
 
     const moving = Math.abs(this.targetX - this.currentX) > 0.02;
 
