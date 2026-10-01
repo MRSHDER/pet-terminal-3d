@@ -69,7 +69,7 @@ export async function createStage(canvas: HTMLCanvasElement): Promise<Stage> {
   scene.add(creature.root);
 
   const loader = new GLTFLoader();
-  const gltf = await loader.loadAsync(`${import.meta.env.BASE_URL}models/fox.glb`);
+  const gltf = await loader.loadAsync(`${import.meta.env.BASE_URL}models/dog.glb`);
 
   const model = gltf.scene;
   model.traverse((o) => {
