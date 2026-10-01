@@ -83,6 +83,10 @@ export default function App() {
     const down = (e: PointerEvent) => {
       const stage = stageRef.current;
       if (!stage) return;
+      // A press that lands on food owns the whole gesture. While a drag is in
+      // progress the creature must not read pointer movement as petting, or
+      // dragging food across the dog makes it think it is being poked and it
+      // walks off to the side.
       if (stage.feeding.beginDrag(e.clientX, e.clientY, stage.camera)) return;
       const nx = (e.clientX / window.innerWidth) * 2 - 1;
       const ny = -(e.clientY / window.innerHeight) * 2 + 1;
@@ -99,9 +103,14 @@ export default function App() {
     const up = () => {
       const stage = stageRef.current;
       if (!stage) return;
-      if (stage.feeding.isDragging) {
+      if (stage.feeding.isDragging || stage.feeding.ownsGesture) {
         stage.feeding.endDrag();
         setHeld(null);
+        // A creature press that never started must not be left latched.
+        if (pressingCreature.current) {
+          pressingCreature.current = false;
+          stage.creature.onTouchEnd();
+        }
         return;
       }
       if (pressingCreature.current) {

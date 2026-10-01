@@ -41,7 +41,6 @@ export class FeedingArea {
 
   private items: FoodItem[] = [];
   private dragging: FoodItem | null = null;
-  private plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private ndc = new THREE.Vector2();
   private raycaster = new THREE.Raycaster();
 
@@ -80,15 +79,37 @@ export class FeedingArea {
     void camera;
   }
 
-  /** Screen point -> world point on the floor plane. */
-  private toFloor(clientX: number, clientY: number, camera: THREE.Camera): THREE.Vector3 | null {
+  /**
+   * Screen point -> a world point the held item should occupy.
+   *
+   * NOT a floor intersection: intersecting a fixed y=0 plane means the item can
+   * only ever slide around on that plane, so the pointer's height is thrown
+   * away and the item feels stuck to the ground. Instead, pick the point along
+   * the pointer ray at a fixed distance from the camera, which lets the item
+   * move up and down with the cursor like something held in the hand.
+   */
+  private toPointer(
+    clientX: number,
+    clientY: number,
+    camera: THREE.Camera,
+  ): THREE.Vector3 | null {
     this.ndc.set(
       (clientX / window.innerWidth) * 2 - 1,
       -(clientY / window.innerHeight) * 2 + 1,
     );
     this.raycaster.setFromCamera(this.ndc, camera);
-    const hit = new THREE.Vector3();
-    return this.raycaster.ray.intersectPlane(this.plane, hit) ? hit : null;
+
+    // Pull the sample point in close to the camera. A distant sample makes the
+    // vertical component of pointer movement almost vanish (the ray is nearly
+    // parallel to the floor out there), which is why the item stayed glued down.
+    // Near the camera the ray is steep, so moving the cursor up actually lifts.
+    const dist = 3.0;
+
+    const p = new THREE.Vector3();
+    this.raycaster.ray.at(dist, p);
+    // Never let it sink through the floor.
+    p.y = Math.max(p.y, 0.06);
+    return p;
   }
 
   /** Returns the food under the pointer, if any. */
@@ -112,6 +133,7 @@ export class FeedingArea {
     const item = this.pick(clientX, clientY, camera);
     if (!item) return false;
     this.dragging = item;
+    this.gestureOwned = true;
     // A small constant lift only — enough to read as "picked up" without the
     // item visibly floating away from the pointer.
     item.group.position.y = DRAG_LIFT;
@@ -125,15 +147,12 @@ export class FeedingArea {
   /** Move the dragged item; returns true if it consumed the pointer move. */
   moveDrag(clientX: number, clientY: number, camera: THREE.Camera): boolean {
     if (!this.dragging) return false;
-    const p = this.toFloor(clientX, clientY, camera);
+    const p = this.toPointer(clientX, clientY, camera);
     if (p) {
-      // Clamp so the item cannot be flung off the far side of the room when the
-      // pointer aims at the dog's head and the floor ray overshoots. The far
-      // bound stays tight; the near bound is loose because that is the direction
-      // the dog actually stands in.
-      const cx = THREE.MathUtils.clamp(p.x, -3, 3);
-      const cz = THREE.MathUtils.clamp(p.z, -0.6, 4);
-      this.dragTarget.set(cx, DRAG_LIFT, cz);
+      // Only clamp the far side, so the item cannot be flung out of the room.
+      const cx = THREE.MathUtils.clamp(p.x, -3.5, 3.5);
+      const cz = THREE.MathUtils.clamp(p.z, -2.5, 4.5);
+      this.dragTarget.set(cx, p.y, cz);
     }
     this.lastPointer = { x: clientX, y: clientY };
     this.nearMouth = this.cb.isOverCreature(clientX, clientY);
@@ -157,6 +176,7 @@ export class FeedingArea {
     const wasOver = this.nearMouth;
     const ptr = this.lastPointer;
     this.dragging = null;
+    this.gestureOwned = false;
     this.nearMouth = false;
     this.lastPointer = null;
     if (!item) return null;
@@ -212,6 +232,20 @@ export class FeedingArea {
     return this.dragging !== null;
   }
 
+  /**
+   * True from pointerdown until pointerup of a food drag.
+   *
+   * The gesture that started on food must own the whole press: while this is
+   * true the creature must not treat pointer movement as petting, otherwise
+   * dragging food across the dog makes it think it is being poked and it walks
+   * away.
+   */
+  private gestureOwned = false;
+
+  get ownsGesture() {
+    return this.gestureOwned;
+  }
+
   /** Debug: current world position and visibility of every food item. */
   debugItems() {
     return this.items.map((i) => ({
@@ -234,10 +268,15 @@ export class FeedingArea {
 
       if (it === this.dragging) {
         // Smoothly chase the pointer instead of snapping to it, so the item
-        // looks held rather than teleported.
+        // looks held rather than teleported. Y follows too, so the item can be
+        // lifted off the floor rather than sliding around on one plane.
         it.group.position.lerp(this.dragTarget, FOLLOW_LERP);
-        it.group.position.y = DRAG_LIFT;
         it.shadow.position.set(it.group.position.x, 0.006, it.group.position.z);
+        // Shadow shrinks as the item rises, which is what sells the height.
+        const lift = Math.max(0, it.group.position.y);
+        const shrink = THREE.MathUtils.clamp(1 - lift * 0.5, 0.45, 1);
+        it.shadow.scale.setScalar(shrink);
+        (it.shadow.material as THREE.MeshBasicMaterial).opacity = 0.28 * shrink;
         it.group.rotation.y += 0.03;
         const s = this.nearMouth ? 1.18 : 1;
         it.group.scale.lerp(new THREE.Vector3(s, s, s), 0.25);
@@ -245,6 +284,8 @@ export class FeedingArea {
       }
 
       it.group.scale.lerp(new THREE.Vector3(1, 1, 1), 0.25);
+      it.shadow.scale.setScalar(1);
+      (it.shadow.material as THREE.MeshBasicMaterial).opacity = 0.28;
       it.group.position.y = Math.sin(t * 1.6 + i * 0.8) * 0.012;
       it.group.rotation.y = Math.sin(t * 0.5 + i) * 0.25;
     }
