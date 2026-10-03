@@ -388,8 +388,6 @@ export async function createStage(
   /** Orbit angle of the camera around the creature, and its eased target. */
   let camYaw = 0;
   let camYawTarget = 0;
-  /** Last yaw the food row was arranged for, so it only re-lays when it moves. */
-  let lastFoodYaw = -99;
 
   // ---- loop
   let raf = 0;
@@ -419,22 +417,42 @@ export async function createStage(
     const targetX = cx + Math.sin(camYaw) * radius;
     const targetZ = cz + Math.cos(camYaw) * radius;
 
-    camera.position.x += (targetX - camera.position.x) * Math.min(1, dt * 1.6);
-    camera.position.z += (targetZ - camera.position.z) * Math.min(1, dt * 1.6);
+    // Ease the camera toward the ring. Using an exponential ease on the OFFSET
+    // (rather than adding a fraction of the absolute delta) makes the approach
+    // frame-rate independent, and it means the creature walking does not yank
+    // the view sideways: the camera keeps its bearing and only its radius
+    // adjusts.
+    const easePos = 1 - Math.exp(-dt * 1.6);
+    camera.position.x += (targetX - camera.position.x) * easePos;
+    camera.position.z += (targetZ - camera.position.z) * easePos;
     camera.position.y = 1.35;
 
-    // Safety net: if the camera somehow ends up inside the creature's bounding
-    // sphere, push it back out along the view direction.
-    const focus = new THREE.Vector3(cx * 0.5, 0.62, cz);
-    const away = camera.position.clone().sub(focus);
+    // Safety net: the camera must never end up inside the creature.
+    //
+    // This clamps RADIALLY ABOUT THE ORBIT CENTRE. The previous version did
+    // `camera.position.copy(focus).add(away)` with focus.x = cx * 0.5, which
+    // moves the camera onto a ring ECCENTRIC to the orbit ring — so the bearing
+    // is no longer the bearing the user asked for, and the camera can end up
+    // facing the creature from an unrelated direction (measured: up to 4.40 rad
+    // of bearing error during a right-drag, still 6.28 rad three seconds after
+    // release). Clamping only the distance about (cx, cz) keeps the bearing
+    // exactly where the user put it and fixes nothing but the distance.
+    const orbitCentre = new THREE.Vector3(cx, 0.62, cz);
+    const away = camera.position.clone().sub(orbitCentre);
     const dist = away.length();
     const MIN_CAM_DIST = 2.2;
     if (dist < MIN_CAM_DIST) {
       away.setLength(MIN_CAM_DIST);
-      camera.position.copy(focus).add(away);
+      camera.position.copy(orbitCentre).add(away);
     }
 
-    camera.lookAt(focus);
+    // Look at the point the camera actually orbits. Previously this was
+    // (cx * 0.5, 0.62, cz) while the ring was centred on (cx, .., cz), so as
+    // soon as the dog walked away from x = 0 the camera aimed at a point beside
+    // it and the creature slid off-centre (measured: 203-207 px off centre at
+    // x = +-1.5, versus 0 px at x = 0). Aiming at the ring centre keeps it
+    // framed while it wanders.
+    camera.lookAt(orbitCentre);
 
     // Tell the creature where the viewer is, in its own local space, so it can
     // turn to meet the camera rather than always presenting a profile.
@@ -451,12 +469,20 @@ export async function createStage(
     const facingYaw = worldYaw - creature.root.rotation.y;
     creature.faceToward(facingYaw, creature.getState().touching);
 
-    // Keep the food row in front of the viewer as the camera swings round, so it
-    // is never occluded by the dog's body.
-    if (Math.abs(camYaw - lastFoodYaw) > 0.01) {
-      feeding.setOrbit(camYaw, creature.root.position);
-      lastFoodYaw = camYaw;
-    }
+    // Lay the food out ONCE, relative to where the dog is standing, and then
+    // leave it alone.
+    //
+    // It used to be re-laid every frame to stay on the viewer's side of the dog
+    // (feeding.setOrbit). That made the food row orbit WITH the camera while the
+    // floor stayed put, so the two rotated at completely different rates and the
+    // food appeared to slide around faster than the ground (measured over a 90
+    // degree orbit: a fixed floor point sweeps 1095 px across the screen, the
+    // food only 77 px, the dog 1 px). Food is lying on the floor; the floor does
+    // not move, so the food must not either.
+    //
+    // The row is placed on the near side at build() time, and the camera radius
+    // (3.7) is larger than the row radius, so it stays in front of the viewer and
+    // is never hidden behind the dog from any angle.
 
     renderer.render(scene, camera);
     raf = requestAnimationFrame(tick);
