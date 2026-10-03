@@ -8,6 +8,34 @@ import { Creature } from './creature';
 import { FeedingArea } from './feeding';
 import type { FoodKind } from './food';
 
+const PIXEL_RENDER_SCALE = 0.42;
+
+const TOON_RAMP = new THREE.DataTexture(
+  new Uint8Array([
+    28, 31, 38,
+    78, 82, 92,
+    165, 139, 104,
+    255, 225, 174,
+  ]),
+  4,
+  1,
+  THREE.RGBFormat,
+);
+TOON_RAMP.magFilter = THREE.NearestFilter;
+TOON_RAMP.minFilter = THREE.NearestFilter;
+TOON_RAMP.needsUpdate = true;
+
+function toonMaterial(color: string, options: { transparent?: boolean; opacity?: number } = {}) {
+  const mat = new THREE.MeshToonMaterial({
+    color,
+    gradientMap: TOON_RAMP,
+    transparent: options.transparent,
+    opacity: options.opacity,
+  });
+  mat.userData.pixelToon = true;
+  return mat;
+}
+
 export interface Stage {
   creature: Creature;
   feeding: FeedingArea;
@@ -30,15 +58,15 @@ export async function createStage(
   canvas: HTMLCanvasElement,
   hooks: StageHooks = {},
 ): Promise<Stage> {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+  renderer.setPixelRatio(1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#0e1013');
-  scene.fog = new THREE.Fog('#0e1013', 6, 16);
+  scene.background = new THREE.Color('#111522');
+  scene.fog = new THREE.Fog('#111522', 6, 16);
 
   const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 100);
   camera.position.set(0, 1.35, 3.6);
@@ -67,8 +95,8 @@ export async function createStage(
 
   // ---- floor
   const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(9, 64),
-    new THREE.MeshStandardMaterial({ color: '#1b1f24', roughness: 0.95, metalness: 0 }),
+    new THREE.CircleGeometry(9, 32),
+    toonMaterial('#202838'),
   );
   floor.rotation.x = -Math.PI / 2;
   floor.receiveShadow = true;
@@ -77,7 +105,7 @@ export async function createStage(
   // faint grid so motion is readable without being busy
   const grid = new THREE.GridHelper(18, 36, 0x2a3138, 0x22272d);
   (grid.material as THREE.Material).transparent = true;
-  (grid.material as THREE.Material).opacity = 0.35;
+  (grid.material as THREE.Material).opacity = 0.25;
   grid.position.y = 0.002;
   scene.add(grid);
 
@@ -96,10 +124,7 @@ export async function createStage(
       m.receiveShadow = true;
       // the source model is tiny; scale it up to room size
       const mat = m.material as THREE.MeshStandardMaterial;
-      if (mat && mat.isMeshStandardMaterial) {
-        mat.roughness = 0.75;
-        mat.metalness = 0.05;
-      }
+      if (mat?.isMeshStandardMaterial) mat.metalness = 0;
     }
   });
 
@@ -130,8 +155,9 @@ export async function createStage(
     const mat = m.material as THREE.MeshStandardMaterial;
     const preset = mat?.name ? DOG_PALETTE[mat.name] : undefined;
     if (preset && mat) {
-      mat.color = new THREE.Color(preset.color);
-      mat.roughness = preset.roughness;
+      const next = toonMaterial(preset.color);
+      next.name = mat.name;
+      m.material = next;
     }
   });
 
@@ -393,6 +419,19 @@ export async function createStage(
   let raf = 0;
   let last = performance.now();
   let elapsed = 0;
+  const resizeRenderer = () => {
+    const cssWidth = window.innerWidth;
+    const cssHeight = window.innerHeight;
+    const pixelWidth = Math.max(320, Math.round(cssWidth * PIXEL_RENDER_SCALE));
+    const pixelHeight = Math.max(180, Math.round(cssHeight * PIXEL_RENDER_SCALE));
+    camera.aspect = cssWidth / cssHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(pixelWidth, pixelHeight, false);
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+  };
+  resizeRenderer();
+
   const tick = () => {
     const now = performance.now();
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -414,36 +453,66 @@ export async function createStage(
     // long, so a radius below that puts the near plane inside its body and the
     // screen fills with fur.
     const radius = 3.7;
-    const targetX = cx + Math.sin(camYaw) * radius;
-    const targetZ = cz + Math.cos(camYaw) * radius;
 
-    // Ease the camera toward the ring. Using an exponential ease on the OFFSET
-    // (rather than adding a fraction of the absolute delta) makes the approach
-    // frame-rate independent, and it means the creature walking does not yank
-    // the view sideways: the camera keeps its bearing and only its radius
-    // adjusts.
-    const easePos = 1 - Math.exp(-dt * 1.6);
-    camera.position.x += (targetX - camera.position.x) * easePos;
-    camera.position.z += (targetZ - camera.position.z) * easePos;
-    camera.position.y = 1.35;
+    // Ease the camera around the ring in POLAR form: track the radius and the
+    // bearing separately, then place the camera at that (radius, bearing).
+    //
+    // Easing the raw X/Z toward the target lets the camera cut the CHORD of the
+    // arc instead of following it, and a chord is always shorter than the radius.
+    // Sweeping quickly therefore pulled the camera inward — measured 3.7 -> 2.2
+    // during a fast drag (slow drag: only 3.60), which then tripped the
+    // MIN_CAM_DIST clamp and snapped it hard to 2.2. That is the "the camera
+    // zooms in when I rotate" bug. In polar form the radius has no way to shrink
+    // while the bearing swings, so orbiting cannot change the distance at all.
+    //
+    // Getting the bearing correct needs the SHORTEST way round, or a target just
+    // past PI would spin the camera the long way.
+    {
+      const orbitCentre = new THREE.Vector3(cx, 0.62, cz);
+      const cur = camera.position.clone().sub(orbitCentre);
+      const curRadius = Math.hypot(cur.x, cur.z);
+      const curBearing = Math.atan2(cur.x, cur.z);
+
+      let dBearing = camYaw - curBearing;
+      while (dBearing > Math.PI) dBearing -= Math.PI * 2;
+      while (dBearing < -Math.PI) dBearing += Math.PI * 2;
+
+      const easeYaw = 1 - Math.exp(-dt * 6);
+      const newBearing = curBearing + dBearing * easeYaw;
+      // The radius only ever eases toward the fixed orbit radius; it is never
+      // derived from the (moving) target point, so it cannot be shortened by
+      // sweeping. Both rates are exponential, so this is frame-rate independent.
+      const easeRadius = 1 - Math.exp(-dt * 1.6);
+      const newRadius = curRadius + (radius - curRadius) * easeRadius;
+
+      camera.position.set(
+        orbitCentre.x + Math.sin(newBearing) * newRadius,
+        1.35,
+        orbitCentre.z + Math.cos(newBearing) * newRadius,
+      );
+    }
 
     // Safety net: the camera must never end up inside the creature.
     //
-    // This clamps RADIALLY ABOUT THE ORBIT CENTRE. The previous version did
-    // `camera.position.copy(focus).add(away)` with focus.x = cx * 0.5, which
-    // moves the camera onto a ring ECCENTRIC to the orbit ring — so the bearing
-    // is no longer the bearing the user asked for, and the camera can end up
-    // facing the creature from an unrelated direction (measured: up to 4.40 rad
-    // of bearing error during a right-drag, still 6.28 rad three seconds after
-    // release). Clamping only the distance about (cx, cz) keeps the bearing
-    // exactly where the user put it and fixes nothing but the distance.
-    const orbitCentre = new THREE.Vector3(cx, 0.62, cz);
-    const away = camera.position.clone().sub(orbitCentre);
-    const dist = away.length();
-    const MIN_CAM_DIST = 2.2;
-    if (dist < MIN_CAM_DIST) {
-      away.setLength(MIN_CAM_DIST);
-      camera.position.copy(orbitCentre).add(away);
+    // Kept as a true last resort. With the polar ease above the radius can no
+    // longer be shortened by orbiting, so this should not fire during a normal
+    // drag; it exists for the case where the CREATURE walks into the camera.
+    //
+    // It clamps radially about the orbit centre, so only the distance is
+    // corrected and the bearing is left exactly where the user put it. An
+    // earlier version did `camera.position.copy(focus).add(away)` with
+    // focus.x = cx * 0.5, which moved the camera onto a ring ECCENTRIC to the
+    // orbit ring (measured: up to 4.40 rad of bearing error, still 6.28 rad
+    // three seconds after release).
+    {
+      const orbitCentre = new THREE.Vector3(cx, 0.62, cz);
+      const away = camera.position.clone().sub(orbitCentre);
+      const dist = away.length();
+      const MIN_CAM_DIST = 2.2;
+      if (dist < MIN_CAM_DIST) {
+        away.setLength(MIN_CAM_DIST);
+        camera.position.copy(orbitCentre).add(away);
+      }
     }
 
     // Look at the point the camera actually orbits. Previously this was
@@ -452,7 +521,7 @@ export async function createStage(
     // it and the creature slid off-centre (measured: 203-207 px off centre at
     // x = +-1.5, versus 0 px at x = 0). Aiming at the ring centre keeps it
     // framed while it wanders.
-    camera.lookAt(orbitCentre);
+    camera.lookAt(cx, 0.62, cz);
 
     // Tell the creature where the viewer is, in its own local space, so it can
     // turn to meet the camera rather than always presenting a profile.
@@ -489,11 +558,7 @@ export async function createStage(
   };
   raf = requestAnimationFrame(tick);
 
-  const onResize = () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  };
+  const onResize = resizeRenderer;
   window.addEventListener('resize', onResize);
 
   // ---- orbit controls

@@ -28,6 +28,8 @@ html, body, #root {
   height: 100%;
   cursor: grab;
   touch-action: none;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 .stage:active { cursor: grabbing; }
 
