@@ -25,6 +25,14 @@ export interface CreatureState {
   sated: number;
 }
 
+/**
+ * How often continuous state drift (bond/sated/irritation) is published to the
+ * HUD. The meters render whole percentages, so 4 updates a second is
+ * indistinguishable from per-frame updates to the player, while avoiding a
+ * state-object allocation and a React re-render on every animation frame.
+ */
+const EMIT_INTERVAL = 0.25;
+
 /** Small deterministic 1D value-noise, so motion is smooth but not a pure sine. */
 function noise1(x: number): number {
   const i = Math.floor(x);
@@ -74,6 +82,8 @@ export class Creature {
   private headLift = 0;
   private tailEnergy = 0;
   private annoyance = 0;
+  /** Accumulates dt so continuous drift is published to the HUD on a throttle. */
+  private emitAccum = 0;
   private blinkTimer = 2;
   private blinking = 0;
   private disposed = false;
@@ -208,6 +218,11 @@ export class Creature {
   /** Pointer pressed down on the creature. */
   onTouchStart() {
     this.state.touching = true;
+    // A press is a discrete, player-driven event with its own emit() below, so
+    // restart the drift throttle. Without this, a poke landing inside an
+    // already-satisfied throttle window was not published until the NEXT window
+    // elapsed, leaving the 烦躁 meter a whole poke behind (measured 22pp lag).
+    this.emitAccum = 0;
 
     // Rapid repeated pokes irritate it. A slow, sustained press does not.
     const since = this.clock - this.lastTouchAt;
@@ -220,9 +235,12 @@ export class Creature {
       this.annoyance = Math.max(0, this.annoyance - 0.15);
     }
 
+    // The meter tracks `annoyance` whatever branch we take, so it is never left
+    // showing a value older than the poke that just happened.
+    this.state.irritation = this.annoyance;
+
     if (this.annoyance > 0.7) {
       this.state.mood = 'annoyed';
-      this.state.irritation = this.annoyance;
       // walk away from the pointer
       this.targetX = this.currentX > 0 ? -1.6 : 1.6;
     } else if (this.annoyance > 0.35) {
@@ -248,8 +266,17 @@ export class Creature {
     if (this.disposed) return;
     this.clock += dt;
 
-    // ---- irritation cools down over time
-    if (!this.state.touching) {
+    // ---- irritation always tracks `annoyance`, held or not.
+    // `annoyance` is the quantity that actually decides whether the creature
+    // walks off, so the 烦躁 meter must read it continuously. Gating this behind
+    // `!touching` froze the meter at its pre-press value for the entire duration
+    // of a held press — i.e. it was live exactly when nothing was happening and
+    // frozen exactly when the player was doing the thing that changes it.
+    if (this.state.touching) {
+      // While held, poke accumulation is already applied in onTouchStart; just
+      // mirror it so the meter responds immediately.
+      this.state.irritation = this.annoyance;
+    } else {
       this.annoyance = Math.max(0, this.annoyance - dt * 0.16);
       this.state.irritation = this.annoyance;
       if (this.annoyance < 0.3 && this.state.mood === 'annoyed') {
@@ -267,6 +294,18 @@ export class Creature {
     // ---- hunger: sated drifts down, so feeding has a reason to exist
     this.state.sated = Math.max(0, this.state.sated - dt * 0.006);
 
+    // The block above mutates state every frame, so the HUD has to be told about
+    // it — otherwise the 饱食/羁绊 meters sit on whatever value the last discrete
+    // event emitted (measured: frozen at 25% while sated fell 24% -> 20%).
+    // emit() copies the state object, so calling it per frame would allocate
+    // 60x/s and re-render React just as often. Throttle instead: publish at most
+    // every EMIT_INTERVAL, which is far below the resolution the meters show.
+    this.emitAccum += dt;
+    if (this.emitAccum >= EMIT_INTERVAL) {
+      this.emitAccum = 0;
+      this.emit();
+    }
+
     // ---- eating reaction: a chew bob, or a recoil if it hated the food
     if (this.eatTimer > 0) {
       this.eatTimer -= dt;
@@ -276,7 +315,14 @@ export class Creature {
       if (this.eatTimer <= 0) {
         this.eatTimer = 0;
         this.chew = 0;
-        this.state.mood = this.state.bond > 0.45 ? 'curious' : 'idle';
+        // Only restore the settled mood if nothing was earned during the chew.
+        // onTouchStart keeps running while it eats, so an unconditional write
+        // here silently discarded a mood the player had just provoked — which
+        // is how 烦躁 could read 1.0 while the caption said it was merely
+        // curious, disabling the rapid-poking -> walk-away loop for 1.5s.
+        if (this.state.mood !== 'annoyed' && this.annoyance < 0.3) {
+          this.state.mood = this.state.bond > 0.45 ? 'curious' : 'idle';
+        }
         this.emit();
       }
     } else {

@@ -170,11 +170,145 @@ export async function createStage(
     p.z *= 1.2;
   });
 
-  // snout: shorter and blunter
+  // snout: shorter and blunter.
+  //
+  // This runs before the muzzle shaping below, which needs the pre-squash
+  // proportions, so it keeps its original job of shortening and widening.
   squashGeometry(/Snout|Nose/i, (p) => {
     p.z *= 0.85;
     p.x *= 1.15;
   });
+
+  // ---------------------------------------------------------------------------
+  // Muzzle: stop the snout reading as a flat panel.
+  //
+  // After the squash above, Fox_Snout is a tapered box whose BACK face is
+  // 0.133 x 0.110 and whose FRONT face is 0.092 x 0.080 — nearly as wide as it
+  // is tall, and almost as wide as the head is (0.28). Viewed in profile that is
+  // a perfectly good protruding muzzle. Viewed HEAD-ON — which is the only view
+  // this app ever presents, because the creature turns to face the viewer —
+  // a short box with a broad flat front reads as a cream square stuck on a dark
+  // slab, with Fox_Nose as a dot in the middle. That is the "bandage".
+  //
+  // The fix is only about the front face: pull its corners in so the muzzle
+  // tapers properly toward the tip, and drop it slightly so the snout reads as
+  // angled downward out of the brow rather than squared off. The back face is
+  // untouched, so the profile silhouette that already looks right does not move.
+  //
+  // The nose rides the snout's taper rather than its own: tapering each mesh by
+  // its own z-span would shrink the small nose about its own centre and leave it
+  // sitting off to one side of the narrowing muzzle.
+  const MUZZLE_TIP = 0.62; // front face scale vs. back, both x and y
+  const MUZZLE_DROOP = 0.022; // tip drops this far (model units) below the root
+
+  const snout = model.getObjectByName('Fox_Snout') as THREE.Mesh | undefined;
+  if (snout) {
+    const geo = snout.geometry as THREE.BufferGeometry;
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    if (pos) {
+      geo.computeBoundingBox();
+      const bb = geo.boundingBox!;
+      const span = bb.max.z - bb.min.z || 1;
+      const midY = (bb.min.y + bb.max.y) / 2;
+      // t = 0 at the root (toward the skull), t = 1 at the tip (most forward, -Z)
+      for (let i = 0; i < pos.count; i++) {
+        const p = new THREE.Vector3().fromBufferAttribute(pos, i);
+        const t = (bb.max.z - p.z) / span;
+        const taper = 1 + (MUZZLE_TIP - 1) * t;
+        p.x *= taper;
+        p.y = midY + (p.y - midY) * taper - MUZZLE_DROOP * t;
+        pos.setXYZ(i, p.x, p.y, p.z);
+      }
+      pos.needsUpdate = true;
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+
+      // Now carry the nose with the snout, using the snout's own taper profile so
+      // the two stay concentric.
+      const nose = model.getObjectByName('Fox_Nose') as THREE.Mesh | undefined;
+      const npos = nose?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+      if (nose && npos) {
+        for (let i = 0; i < npos.count; i++) {
+          const p = new THREE.Vector3().fromBufferAttribute(npos, i);
+          const t = Math.min(1, Math.max(0, (bb.max.z - p.z) / span));
+          const taper = 1 + (MUZZLE_TIP - 1) * t;
+          p.x *= taper;
+          p.y = midY + (p.y - midY) * taper - MUZZLE_DROOP * t;
+          npos.setXYZ(i, p.x, p.y, p.z);
+        }
+        npos.needsUpdate = true;
+        nose.geometry.computeVertexNormals();
+        nose.geometry.computeBoundingSphere();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Eyes: bring them forward onto the face and make them readable.
+  //
+  // Measured from the source GLB (model space, before any app transform):
+  //     Fox_Head   x=[-0.140, 0.140]  z=[-0.410, -0.170]   a frustum, 0.24 deep
+  //     Fox_Snout  root 0.133 x 0.110 at z=-0.3485, tip at z=-0.493
+  //     Fox_Eye_L  x=[ 0.127, 0.135]  y=[0.661,0.709]  z=[-0.350,-0.290]
+  //
+  // The eye is a 0.008-thick fin lying ACROSS the skull's side wall, and it sits
+  // 0.09 BEHIND the head's front face (z=-0.41) at |x|=0.131, where the head is
+  // only 0.1275 wide. Projected through the camera, both eyes land 0.25-0.46
+  // units behind the head's own front surface — buried in the skull. Measured on
+  // a flat-colour isolation render, the left eye covers 5 px head-on and the
+  // right eye is not visible at all.
+  //
+  // It is a fox eye, authored for a long pointed fox face; this is a blunt dog
+  // with a short muzzle, so it has to move FORWARD onto the cheek and INBOARD
+  // off the silhouette, and be rebuilt as a compact quad rather than a fin.
+  // Binding to the Head bone is untouched — only vertices move.
+  const EYE_X = 0.080; // |x| of the eye centre (was 0.131)
+  const EYE_Y = 0.655; // eye height stays on the brow
+  const EYE_Z = -0.405; // just proud of the head's front face (was -0.320)
+  const EYE_HALF = 0.022; // half-extent: square, so it reads as an eye
+  const EYE_YAW = Math.PI / 6; // 30 deg off the wall, turning it toward the viewer
+
+  for (const name of ['Fox_Eye_L', 'Fox_Eye_R'] as const) {
+    const m = model.getObjectByName(name) as THREE.Mesh | undefined;
+    if (!m) continue;
+    const geo = m.geometry as THREE.BufferGeometry;
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    if (!pos) continue;
+    geo.computeBoundingBox();
+    const bb = geo.boundingBox!;
+    const side = (bb.min.x + bb.max.x) / 2 >= 0 ? 1 : -1;
+    // Quad basis. The eye's face normal starts pointing straight out of the
+    // cheek (+/-X) and is rotated EYE_YAW toward the front (-Z), which is the
+    // direction the camera looks from. In-plane axes are that normal rotated 90
+    // degrees within the XZ plane, and straight up.
+    const nx = side * Math.cos(EYE_YAW);
+    const nz = -Math.sin(EYE_YAW);
+    const rx = -nz;
+    const rz = nx;
+    const ex = (bb.max.x - bb.min.x) || 1;
+    const ey = (bb.max.y - bb.min.y) || 1;
+    const ez = (bb.max.z - bb.min.z) || 1;
+    for (let i = 0; i < pos.count; i++) {
+      const p = new THREE.Vector3().fromBufferAttribute(pos, i);
+      // Normalise the source fin's own axes into -1..1, then rebuild the vertex
+      // as a corner of the square quad. The fin's long axis (z) becomes the
+      // quad's in-plane "right", its height (y) stays vertical, and its 0.008
+      // thickness (x) becomes a small relief along the normal so the eye is a
+      // thin slab rather than a zero-volume plane.
+      const u = ((p.z - bb.min.z) / ez) * 2 - 1;
+      const v = ((p.y - bb.min.y) / ey) * 2 - 1;
+      const w = ((p.x - bb.min.x) / ex) * 2 - 1;
+      pos.setXYZ(
+        i,
+        side * EYE_X + rx * u * EYE_HALF + nx * w * 0.004,
+        EYE_Y + v * EYE_HALF,
+        EYE_Z + rz * u * EYE_HALF + nz * w * 0.004,
+      );
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+  }
 
   // tail: thinner and straighter than a fox brush
   squashGeometry(/Tail_1|Tail_2/i, (p, bb) => {
@@ -192,9 +326,12 @@ export async function createStage(
   const scale = 1.9 / longest;
   model.scale.setScalar(scale);
 
-  // The animal runs along +Z, i.e. it is authored nose-out toward the camera when
-  // unrotated. Leave it there: the creature drives its own yaw via `pivot`, and a
-  // baked quarter-turn here would make "face the viewer" impossible to express.
+  // The animal is authored nose at -Z and tail at +Z (Fox_Nose centres at
+  // z = -0.958, Fox_Tail_2 at z = +0.958), so an unrotated model presents its
+  // BACK to a camera parked on +Z — which is exactly where the orbit ring puts
+  // it at camYaw = 0. Leave the authored orientation alone: the creature drives
+  // its own yaw via `pivot`, and a baked half-turn here would only hide the
+  // convention that the facing maths below has to account for.
   model.rotation.x = -0.04;
 
   const box2 = new THREE.Box3().setFromObject(model);
@@ -301,9 +438,18 @@ export async function createStage(
 
     // Tell the creature where the viewer is, in its own local space, so it can
     // turn to meet the camera rather than always presenting a profile.
-    const worldYaw = camYaw; // camera sits at +yaw around the origin
+    //
+    // The model is authored nose at -Z, so its local forward is (0, 0, -1); at a
+    // pivot yaw t that forward becomes (-sin t, 0, -cos t). The camera sits at
+    // angle camYaw on the ring, i.e. in the direction (sin camYaw, 0, cos camYaw)
+    // as seen from the creature. Meeting it head-on therefore needs
+    //   (-sin t, -cos t) == (sin camYaw, cos camYaw)   =>   t = camYaw + PI.
+    // `faceToward` is also called every frame with a fresh absolute target, so
+    // the error term it eases away is what keeps this tracking as the camera
+    // swings — a constant offset here would only ever be right at one angle.
+    const worldYaw = camYaw + Math.PI; // camera sits at +yaw around the origin
     const facingYaw = worldYaw - creature.root.rotation.y;
-    creature.faceToward(-facingYaw, creature.getState().touching);
+    creature.faceToward(facingYaw, creature.getState().touching);
 
     // Keep the food row in front of the viewer as the camera swings round, so it
     // is never occluded by the dog's body.
